@@ -1,0 +1,1254 @@
+---
+title: "Superstore Marketing Campaign"
+subtitle: "Sample Customer Data for Analysis of a Targeted Membership Offer"
+output:
+  html_document:
+    fig_caption: yes
+    theme: paper
+    toc: true
+    toc_float: yes
+---
+
+# Objectives
+
+- Visualize data with clustering techniques including multiple correspondence analysis, multivariate discriminant analysis, and comparison of dendrograms (visual segmentation of customers’ profile).
+- Verify whether the clusters are aligned with the customers’ profiles (education level, marital status, filed a complaint, etc.).
+- Use step-wise techniques in regressions to predict the likelihood of positive customer response to the marketing campaign.
+
+```{r setup, include=FALSE}
+options(messages = FALSE)
+
+# install libraries
+library(ggplot2)
+library(visdat)
+library(cluster)
+library(factoextra)
+library(fpc)
+library(tidyverse)
+library(clValid)
+library(Hmisc)
+library(pvclust)
+library(parallel)
+library(dbscan)
+library(corrr)
+library(reshape2)
+library(MASS)
+library(caret)
+```
+
+# The Dataset
+
+A superstore is planning for the year-end sale. They want to launch a new offer - gold membership, that gives a 20% discount on all purchases, for only \$499 which is $999 on other days. It will be valid only for existing customers and the campaign through phone calls is currently being planned for them. The management feels that the best way to reduce the cost of the campaign is to make a predictive model which will classify customers who might purchase the offer.
+
+Source of data: https://www.kaggle.com/datasets/ahsan81/superstore-marketing-campaign-dataset
+
+|Variable|Description|
+|---|---|
+|<span style="color: blue;">CUSTOMERS INFORMATION||
+|Response **(target)**|1 if customer accepted the offer in the last campaign, 0 otherwise|
+|ID|Unique ID of each customer|
+|Year_Birth|Age of the customer|
+|Dt_Customer|Date of customer's enrollment with the company|
+|Education|Customer's level of education (Basic, Second Cycle, Graduation, Master, PhD)|
+|Marital|Customer's marital status (Single, Together, Married, Divorced, Other)|
+|Kidhome|Number of small children in customer's household (0, 1, 2)|
+|Teenhome|Number of teenagers in customer's household (0, 1, 2)|
+|Income|Customer's yearly household income|
+|Complain|1 if the customer complained in the last 2 years|
+|Recency|Number of days since the last purchase|
+|<span style="color: blue;">AMOUNT OF MONEY SPENT ON TYPES OF PRODUCTS||
+|MntFishProducts|The amount spent on fish products in the last 2 years|
+|MntMeatProducts|The amount spent on meat products in the last 2 years|
+|MntFruits|The amount spent on fruits products in the last 2 years|
+|MntSweetProducts|The amount spent on sweet products in the last 2 years|
+|MntWines|The amount spent on wine products in the last 2 years|
+|MntGoldProds|The amount spent on gold products in the last 2 years|
+|<span style="color: blue;">NUMBER OF PURCHASES MADE THROUGH TYPES OF CHANNELS||
+|NumDealsPurchases|Number of purchases made with discount|
+|NumCatalogPurchases|Number of purchases made using catalog (buying goods to be shipped through the mail)|
+|NumStorePurchases|Number of purchases made directly in stores|
+|NumWebPurchases|Number of purchases made through the company's website|
+|NumWebVisitsMonth|Number of visits to company's website in the last month|
+
+For this project, we are assuming that the survey ended in December 2014 and we are doing our analyses in January 2015. This will be the basis for transforming some of our date-time variables later.
+
+```{r, include=FALSE}
+# read in the dataset
+super <- read.csv("Superstore Marketing Campaign.csv")
+head(super)
+```
+
+# Exploratory Data Analysis
+
+```{r}
+# overview of data attributes
+str(super)
+```
+
+From a quick look at the dataset, we are not interested in the birth year of the customers or the date of customers' enrollment with the company. However, the age profile of the customers might have some relationship with the customers' response. As such, we will create a new column called **Age** from the **Year_Birth** column. We will also transform the date of customers' enrollment into the number of days since the customers joined (counting up until 01/01/2015)in a new column called **days_joined**. Then, since **Year_Birth** and **Dt_Customer** contain redundant information, we will remove them from our dataset.
+
+```{r}
+# transform Year_Birth into Age
+yr <- 2015
+super["Age"] <- yr - super["Year_Birth"]
+```
+
+```{r}
+# set today as 01/01/2015
+today <- as.Date("01/01/2015", format = "%m/%d/%Y")
+
+# reformat the date in Dt_Customer into the YYYY-MM-DD format
+super$Dt_formatted <- as.POSIXct(super$Dt_Customer, format="%m/%d/%Y")
+
+# calculate the number of days since customers joined
+super$days_joined <- as.numeric(difftime(today, super$Dt_formatted), unit="days")
+```
+
+```{r}
+# remove redundant columns (Year_Birth, Dt_Customer and Dt_formatted)
+super <- subset(super, select = -c(Year_Birth, Dt_Customer, Dt_formatted))
+```
+
+```{r}
+# descriptive summary of the data
+summary(super)
+```
+
+## Data Cleaning
+
+```{r}
+# visualize missing data
+vis_miss(super) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5))
+
+# total number of missing values
+cat("\nTotal number of missing values:", sum(is.na(super)))
+
+# percentage of missing data
+cat("\nPercentage of missing data:", (sum(is.na(super))/nrow(super))*100, "%")
+```
+
+There are some missing values in the **_Income_** variable. Since income might have an impact on the purchase capability of the customers and the missing data constitute only 1.07% of the entire dataset, we will include this variable in our analysis after removing the missing observations.
+
+```{r}
+# remove missing data
+super <- na.omit(super)
+cat("Number of missing values:", sum(is.na(super)))
+```
+
+The **_Id_** column represents the unique ID of each customer, so we can use this column to check for any incorrect duplicate entries. Since there are none, we can go ahead and remove the _**Id**_ column from our dataset.
+
+```{r}
+# duplicates in Id
+sum(duplicated(super$Id))
+
+# remove the Id column
+super <- super[-1]
+```
+
+## Data Variation
+
+### Response Variable
+
+```{r, fig.width=6, fig.height=6}
+# count and percentage of each categories in satisfaction
+response_count <- as.data.frame(table(super$Response))
+response_count$percent <- response_count$Freq / sum(response_count$Freq) * 100
+
+# pie chart
+ggplot(response_count, aes(x = '', y = Freq, fill = factor(Var1))) +
+  geom_bar(stat = 'identity', width = 1) +
+  coord_polar(theta = 'y') +
+  theme_void() +
+  scale_fill_manual(values = c('#3F7ED5', '#C7DFF9'),
+                    name = '',
+                    labels = c('refused', 'accepted')) +
+  labs(title = 'Pie chart of Response') +
+  theme(legend.text = element_text(size = 10),
+        legend.position = 'right',
+        plot.title = element_text(hjust = 0.5, face = 'bold')) +
+  geom_text(aes(label = paste0(round(percent, 2), '%')),
+            position = position_stack(vjust = 0.5))
+```
+
+### Categorical Variables
+
+```{r, fig.width=6, fig.height=6}
+# list of column names
+cat_cols <- colnames(super[c('Education', 'Marital_Status', 'Kidhome', 'Teenhome', 'Complain')])
+
+for (col in cat_cols) {
+  # a data frame with the count of each category in the current column
+  cat_count <- data.frame(table(super[[col]]))
+
+  # a bar plot of the count data
+  print(ggplot(cat_count, aes(x = Var1, y = Freq)) +
+    geom_bar(stat = 'identity', fill = '#3F7ED5') +
+    geom_text(aes(label = Freq), vjust = -0.5) +
+    theme(axis.ticks = element_blank(),
+          plot.title= element_text(face = "bold")) +
+    labs(title = col, x = '', y = "Count"))
+}
+```
+
+### Numerical Variables
+
+```{r, fig.width=6, fig.height=6}
+# name of numerical columns (with more than 20 unique values)
+num_cols1 <- super %>%
+  select_if(function(x) length(unique(x)) > 20) %>%
+  colnames
+
+# histogram for each column
+for (col in num_cols1) {
+  print(ggplot(super, aes(x = .data[[col]])) +
+  geom_histogram(binwidth = 1, color = '#3F7ED5')+
+  labs(title = col, x = '', y = 'Frequency') +
+  theme(axis.ticks = element_blank(),
+        plot.title= element_text(face = "bold")))
+}
+```
+
+```{r, fig.width=6, fig.height=6}
+# name of numerical columns (remaining, with less than or 20 unique values)
+num_cols2 <- colnames(super)[!(colnames(super) %in% num_cols1 | colnames(super) %in% cat_cols | colnames(super) %in% "Response")]
+
+# histogram for each numerical column
+for (col in num_cols2) {
+  print(ggplot(super, aes(x = .data[[col]])) +
+  geom_histogram(binwidth = 1, color = '#3F7ED5')+
+  labs(title = col, x = '', y = 'Frequency') +
+  theme(axis.ticks = element_blank(),
+        plot.title= element_text(face = "bold")))
+}
+```
+
+## Outliers
+
+From the boxplots, some extreme outliers can be detected in **MntMeatProducts**, **NumWebPurchases**, **NumCatalogPurchases**, **Income** and **Age**. For example, in **Age**, there are 3 entries of over 100 years old, or in **Income**, there is an entry of 666666. Since there is no information on the data collection process and the nature of the data, these outliers can not be validated and therefore, best kept in the dataset as they may represent genuine variation in the data or contain important information.
+
+```{r, fig.width=10, fig.height=6}
+# types of product
+boxplot(super[, c('MntWines', 'MntFruits', 'MntMeatProducts', 'MntFishProducts', 'MntSweetProducts', 'MntGoldProds')],
+              main = "The amount of money spent on types of products in the last 2 years",
+              names = c("wines", "fruits", "meat", "fish", "sweet", "gold"),
+              col = '#3F7ED5'
+        )
+
+# types of channels
+boxplot(super[, c('NumDealsPurchases', 'NumWebPurchases', 'NumCatalogPurchases', 'NumStorePurchases')],
+              main = 'Number of purchases made through types of channels',
+              names = c("discount", "website", "catalog", "store"),
+              col = '#3F7ED5'
+        )
+```
+
+```{r, fig.width=6, fig.height=6}
+# Income
+boxplot(super$Income, 
+        main = "Income", 
+        col = '#3F7ED5')
+
+# Recency
+boxplot(super$Recency, 
+        main = "Recency", 
+        col = '#3F7ED5')
+
+# NumWebVisitsMonth
+boxplot(super$NumWebVisitsMonth,
+        main = "Number of visits to the company's website in the last month",
+        col = '#3F7ED5')
+
+# Age
+boxplot(super$Age, 
+        main = "Age", 
+        col = '#3F7ED5')
+
+# days_joined
+boxplot(super$days_joined, 
+        main = "Number of days since joining the program", 
+        col = '#3F7ED5')
+```
+
+```{r}
+# outliers in Age
+for (i in 1:length(super$Age)) {
+  if (super$Age[i] > 100) {
+    cat("Outlier:", super$Age[i], " at observation no.", i, "\n")
+  }
+}
+```
+
+```{r}
+# outlier in Income
+cat("Outlier in Income:", max(super$Income), " at observation no.", which(super$Income == max(super$Income)))
+```
+
+## Correlation
+
+From the correlation matrix, we can see that **Recency** has very weak correlation with all other variables. Therefore, we should note to drop Recency from our clustering assessment.
+
+```{r}
+# correlation matrix
+corr_matrix <- super %>%
+  select_if(is.numeric) %>%
+  correlate(diagonal = 1)
+
+corr_matrix
+```
+
+```{r, fig.width=10, fig.height=6}
+# heatmap of correlation
+corr_matrix %>%
+  rearrange(method = "MDS", absolute = FALSE) %>%
+  shave() %>%
+  rplot(shape = 15, colours = c("#D3D3D3", "#3F7ED5")) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 1, hjust = 1),
+  axis.text.y = element_text(angle = 0, vjust = 1, hjust = 1),
+        axis.ticks = element_blank())
+```
+
+# Subsets
+
+In order to perform the clustering procedures, we will subset only the numerical variables. **Recency** and **Response** will also be excluded. Hence, the variables taken forward for clustering are:
+
+- Income, NumWebVisitsMonth, Age, days_joined
+
+- MntWines, MntFruits, MntMeatProducts, MntFishProducts, MntSweetProducts and MntGoldProds
+
+- NumDealsPurchases, NumWebPurchases, NumCatalogPurchases and NumStorePurchases
+
+```{r}
+# subset the dataset
+df <- super[ , !names(super) %in% c(cat_cols, 'Response', 'Recency')]
+cat("Subset df\nDimension:", dim(df), "\n\n")
+colnames(df)
+head(df)
+```
+
+# Standardization
+
+It's generally recommended to standardize variables in the data set before performing subsequent analysis. Standardization makes variables comparable, when they are measured in different scales.
+
+```{r}
+# scaling
+df2 <- scale(df)
+head(df2)
+```
+
+# Clustering Tendency Assessment
+
+Before applying any clustering algorithm to the data set, the first thing to do is to assess the clustering tendency. That is, whether applying clustering is suitable for the data.
+
+```{r}
+set.seed(123)
+# random data generated from the "df" data set
+random_df <- apply(df, 2,
+                function(x){runif(length(x), min(x), (max(x)))})
+random_df <- as.data.frame(random_df)
+
+# standardize the random data sets
+random_df <- scale(random_df)
+```
+
+## Visual Inspection
+
+We start by visualizing the data to assess whether they contains any meaningful clusters. As the data contain more than two variables, we need to reduce the dimension in order to create a scatter plot using principal component analysis (PCA) algorithm.
+
+As in the plots, the faithful data set may contain 2 real clusters. However, the randomly generated data set doesn't contain any meaningful clusters.
+
+```{r}
+# plot faithful data set
+fviz_pca_ind(prcomp(df2), title = "PCA - Faithful data", palette = "jco",
+             geom = "point", ggtheme = theme_classic())
+
+# plot random data set
+fviz_pca_ind(prcomp(random_df), title = "PCA - Random data",
+             geom = "point", ggtheme = theme_classic())
+```
+
+## Hopkins Statistic Method
+
+We can conduct the Hopkins Statistic test iteratively, using 0.5 as the threshold to reject the alternative hypothesis. That is, if H < 0.5, then it is unlikely that the data set has statistically significant clusters.
+
+We can see that the superstore data set is highly clusterable (**H** = 0.89, which is far above the threshold 0.5). However the random_df data set is not clusterable (**H** = 0.5).
+
+```{r}
+# compute Hopkins statistic for the superstore dataset
+set.seed(123)
+res <- get_clust_tendency(df2, n = nrow(df2)-1, graph = FALSE)
+res$hopkins_stat
+```
+
+```{r}
+# compute Hopkins statistic for a random dataset
+set.seed(123)
+res.re <- get_clust_tendency(random_df, n = nrow(random_df)-1,
+                          graph = FALSE)
+res.re$hopkins_stat
+```
+
+## Visual Method
+
+For visual evaluation of cluster tendency, the dissimilarity (DM) matrix between the objects in the data set using the Euclidean distance measure is calculated. The dissimilarity matrix images confirm that there is a cluster structure in the original data set but not in the random one.
+
+```{r}
+# faithful data
+fviz_dist(dist(df2), show_labels = FALSE)+ labs(title = "Faithful data")
+
+# random data
+fviz_dist(dist(random_df), show_labels = FALSE)+ labs(title = "Random data")
+```
+
+# Cluster Algorithm Selection
+
+Before selecting cluster algorithm, it should be noted that our dataset contains many outliers. Some clustering algorithms, such as K-means clustering, are sensitive to outliers and may not be a good method to apply. A more robust and less sensitive to noises alternative to K-means clustering is K-medoids clustering, two types of which we will consider are Partitioning around Medoids (PAM) and Clustering Large Applications (CLARA). CLARA is a variation of PAM designed to handle large dataset. In our case, we have over 2000 observations, meaning that CLARA may be more suitable than PAM. However, it should also be noted that CLARA may not produce clustering results as accurate as PAM due to its reliance on random sampling.
+
+## Internal Measures
+
+The algorithms evaluated are: hierarchical, K-means, PAM and CLARA. 3 internal measures to consider when determining the best clustering algorithm are:
+
+- Connectedness – between  0 and infinity – should be minimized
+- Silhouette Coefficient  - between  -1 and 1 – should be maximized
+- Dunn index – between 0 and infinity – should be maximized
+
+Among the algorithms assessed, hierarchical yield the best results for all 3 internal measures. Regardless of the clustering algorithm, the optimal number of clusters is suggested to be 2.
+
+```{r}
+# define algorithms to consider
+clmethods <- c("hierarchical","kmeans","pam", "clara")
+
+# apply internal measures
+intern <- clValid(df2, nClust = 2:6,
+              clMethods = clmethods, maxitems = 2500, validation = "internal")
+# summary
+summary(intern)
+```
+
+## Stability Measures
+
+4 values are considered for the measurement of stability:
+
+- The average proportion of non-overlap (APN)
+- The average distance (AD)
+- The average distance  between mean (ADM)
+- The figure of merit (FOM)
+
+The values of APN, ADM and FOM range from 0 to 1, with smaller value corresponding to highly consistent clustering results. AD has a value between 0 and infinity, and smaller values are also preferred.
+
+The best clustering methods and number of clusters for each stability measure are summarized as follows:
+
+- APN and ADM: hierarchical - 3 clusters
+- AD: PAM - 6 clusters
+- FOM: CLARA - 6 clusters
+
+```{r}
+# apply stability measures
+stab <- clValid(df2, nClust = 2:6, clMethods = clmethods, maxitems = 2500, validation = "stability")
+
+# display only optimal scores
+optimalScores(stab)
+```
+
+# Hierarchical Clustering
+
+## Linkage Method
+
+There are many linkage methods for hierarchical clustering. To check if the clustering of a particular linkage is valid, we will compute the correlation between the cophenetic distances and the original distances in the distance matrix. The closer the value of correlation coefficient is to 1, the more accurately the clustering solution reflects the data. Values above 0.75 indicates that the clustering solutions is good to move forward with.
+
+We will consider 3 linkage methods: Ward, complete and average. Comparing the correlation coefficients between the original distance and each of the cophenetic distance of the hierarchical clustering using these 3 linkages, the average linkage method is suggested to be the best choice since it has the largest value of correlation coefficient 0.85 (> 0.7).
+
+```{r}
+# compute the dissimilarity matrix
+res.dist <- dist(df2, method = "euclidean")
+
+# view the first 6*6 matrix
+as.matrix(res.dist)[1:6, 1:6]
+```
+
+```{r}
+### Ward method
+res.hc.ward <- hclust(d = res.dist, method = "ward.D2")
+
+# compute cophenetic distance
+res.coph.ward <- cophenetic(res.hc.ward)
+
+# correlation between cophenetic distance and the original distance
+cor(res.dist, res.coph.ward)
+```
+
+```{r}
+### complete method
+res.hc.com <- hclust(d = res.dist, method = "complete")
+
+# compute cophenetic distance
+res.coph.com <- cophenetic(res.hc.com)
+
+# correlation between cophenetic distance and the original distance
+cor(res.dist, res.coph.com)
+```
+
+```{r}
+### average method
+res.hc.avg <- hclust(d = res.dist, method = "average")
+
+# compute cophenetic distance
+res.coph.avg <- cophenetic(res.hc.avg)
+
+# correlation between cophenetic distance and the original distance
+cor(res.dist, res.coph.avg)
+```
+
+## Optimal Number of Clusters
+
+To determine the optimal number of clusters, we will use 3 approaches: elbow, silhouette and gap statistic method. While the elbow and gap statistic suggest 3 clusters, the silhouette suggests 2. While 3 clusters is in agreement with our assessment from the cluster algorithm selection procedeure, ultimately, we will consider both 2 and 3 clusters to see which number produces the best clustering result.
+
+```{r}
+# elbow plot
+# 3 clusters suggested
+fviz_nbclust(df2, hcut, method = "wss") +
+  geom_vline(xintercept = 3, linetype = 2)+
+  labs(subtitle = "Elbow method")
+```
+
+```{r}
+# silhouette method
+# 2 clusters suggested
+fviz_nbclust(df2, hcut, method = "silhouette") +
+  labs(subtitle = "Silhouette method") +
+  theme_classic()
+```
+
+```{r}
+# gap statistic method
+# 3 clusters suggested
+fviz_nbclust(df2, hcut,  method = "gap_stat",
+                  nboot = 50, maxSE = list(method = 'Tibs2001SEmax',
+                                            SE.factor = 1)) +
+  labs(subtitle = "Gap statistic method")
+```
+
+## Agglomerative Hierarchical Clustering
+
+```{r}
+# compute agglomerative hierarchical clustering
+res.agnes <- agnes(x = df2, # data matrix
+                  metric = "euclidean", # metric for distance matrix
+                  method = "average" # Linkage method
+                   )
+
+# dendrogram
+fviz_dend(res.agnes, show_labels = FALSE,
+          palette = "jco", as.ggplot = TRUE)
+```
+
+As shown in the dendrogram, there are relatively large cophenetic distance between some objects. If we cut-off at the top of the tree, we will get clusters with small number of data points. This may be because we have outliers in the data set which result in large distances between clusters.
+
+```{r}
+# cut the tree into 2 groups
+grp <- cutree(res.agnes, k = 2)
+fviz_cluster(list(data = df2, cluster = grp),
+             ellipse.type = "convex", geom = "point",
+             repel = TRUE, # avoid label overplotting (slow)
+             show.clust.cent = FALSE, ggtheme = theme_minimal())
+
+# cut the tree into 3 groups
+grp1 <- cutree(res.agnes, k = 3)
+fviz_cluster(list(data = df2, cluster = grp1),
+             ellipse.type = "convex", geom = "point",
+             repel = TRUE, # avoid label overplotting (slow)
+             show.clust.cent = FALSE, ggtheme = theme_minimal())
+```
+
+From the cluster plot, it is seen that the clusters are overlapped. Cluster 1 contains the majority of the data points and has a wide range in the plot. The other clusters with very few data points locating in the range of cluster 1. Again, it may be resulted from the outliers in the data set.
+
+## Cluster Validation
+
+### Silhouette Coefficient
+
+```{r}
+###plot the silhouette for each observation
+sil <- silhouette(grp, dist(df2))
+#sil <- silhouette(cutree(res.hc.avg, k = 2), dist(df2))
+fviz_silhouette(sil)
+```
+
+### P-value
+
+```{r}
+# transpose the data set to perform the clustering on the variables
+df.t <- t(df2)
+```
+
+```{r}
+set.seed(123)
+ss <- sample(1:2034, 30) # extract 30 samples out of 2034
+df3 <- df.t[, ss]
+```
+
+```{r}
+### Create a parallel socket cluster
+set.seed(123)
+
+cl <- makeCluster(2, type = "PSOCK")
+
+### parallel version of pvclust
+res.pv <- parPvclust(cl, df3, nboot=1000)
+stopCluster(cl)
+```
+
+```{r}
+# Default plot
+plot(res.pv, hang = -1, cex = 0.5)
+pvrect(res.pv)
+```
+
+Values on the dendrogram are AU p-values (Red, left), BP values (green, right), and cluster labels (grey, bottom). Clusters with AU > = 95% are indicated by the rectangles and are considered to be strongly supported by data.
+
+We can see from the plot that once we compute hierarchical clustering on the bootstrap samples, there are some meaningful and strong clusters. Because the sampling process reduces the impact of the outliers.
+
+Overall, with outliers in our data set, hierarchical clustering is not suggested as an appropriate method.
+
+# CLARA
+
+## Optimal Number of Clusters
+
+Similar to the procedure in hierarchical clustering, we will use the elbow, silhouette and gap statistic method to determine the optimal number of clusters for CLARA. While elbow and gap statistic method suggest 3 as the optimal number of clusters, silhouette method suggests 2.
+
+Recall that in our cluster algorithm selection, the FOM value suggests 6 clusters as th optimal number for the CLARA algorithm. FOM has many limitations, amongst which are the lack of robustness, the susceptibility to noises and the assumption that the data has a uniform distribution. Since our dataset contains some extreme outliers and does not have a uniform distribution, FOM value does not provide a good choice for the optimal number of clusters.
+
+In short, moving forward, we will be considering 2 clusters and 3 clusters for the CLARA algorithm.
+
+```{r}
+# elbow plot
+# 3 clusters suggested
+fviz_nbclust(df2, clara, method = "wss") +
+  geom_vline(xintercept = 3, linetype = 2)+
+  labs(subtitle = "Elbow method")
+```
+
+```{r}
+# silhouette method
+# 2 clusters suggested
+fviz_nbclust(df2, clara, method = "silhouette")+
+  labs(subtitle = "Silhouette method") + theme_classic()
+```
+
+```{r}
+# gap statistic method
+# 3 clusters suggested
+fviz_nbclust(df2, clara,  method = "gap_stat", nboot = 50)+
+  labs(subtitle = "Gap statistic method")
+```
+
+## CLARA Clustering
+
+```{r}
+## CLARA clustering
+
+# save the numbers of clusters to test in a list
+k_list <- list(2, 3)
+
+# empty list for clara objects
+clara_list <- list()
+
+# empty list for datasets with clustering labels
+dfclusters_list <- list()
+
+#empty list for medoids objects (dataframes)
+medoids_list <- list()
+
+# loop through list of numbers of clusters
+for (i in seq_along(k_list)) {
+  n_cluster <- k_list[[i]]
+
+  # compute clara cluster for a specified number of clusters
+  # save clara object to empty list
+  clara.res <- clara(df2, n_cluster, samples = 200, pamLike = TRUE)
+  clara_list[[i]] <- clara.res
+
+  # save the medoids to the empty list
+  medoids_list[[i]] <- clara.res$medoids
+
+  # add clustering labels to dataset
+  dfclusters <- cbind(df2, cluster = clara.res$cluster)
+  dfclusters_list[[i]] <- dfclusters
+}
+```
+
+```{r}
+# example: print results for CLARA with 2 clusters
+# can do the same for CLARA with 3 clusters by changing the index from 1 to 2
+clara_list[[1]]
+
+# CLARA medoids for 2 clusters
+medoids_list[[1]]
+
+# Dataset with clustering labels for 2 clusters
+head(dfclusters_list[[1]],3)
+```
+
+## Visualization
+
+```{r}
+for (i in seq_along(k_list)) {
+  p <- fviz_cluster(clara_list[[i]],
+             ellipse.type = "t", # Concentration ellipse
+             geom = "point", pointsize = 1,
+             ggtheme = theme_classic())
+  print(p)
+    }
+```
+
+## Cluster Validation
+
+### Internal Validation
+
+**Silhouette (Si) coefficient:** or the average silhouette width measures how similar an object i is to the other objects in its own cluster versus those in the neighbor cluster. Si values range from 1 to - 1:
+
+- A value of Si close to 1 indicates that the object is well clustered. In the other words,
+the object i is similar to the other objects in its group.
+- A value of Si close to -1 indicates that the object is poorly clustered, and that
+assignment to some other cluster would probably improve the overall results.
+
+Both CLARA procedure with 2 clusters and 3 clusters have similar average Si coefficients (0.29 and 0.25). Additionally, in both cases, the average Si coefficient for the smallest cluster is around 0.11 - 0.13, while the average Si coefficient for the largest cluster is around 0.34 - 0.39. In other words, procedure with 2 clusters and 3 clusters produce the same level of poor clustering, since Si coefficients in both cases are relatively close to 0, meaning clustering is no better than random.
+
+```{r}
+# plot the silhouette for each observation
+for (i in seq_along(k_list)) {
+  p <- fviz_silhouette(clara_list[[i]], palette = "jco",
+                ggtheme = theme_classic())
+
+  print(p)
+    }
+```
+
+```{r}
+# silhouette information
+silinfo_2clust <- clara_list[[1]]$silinfo
+silinfo_3clust <- clara_list[[2]]$silinfo
+```
+
+```{r}
+# silhouette widths of each observation
+sil_2clust <- silinfo_2clust$widths[, 1:3]
+sil_3clust <- silinfo_3clust$widths[, 1:3]
+```
+
+```{r}
+# average silhouette width of each cluster
+silinfo_2clust$clus.avg.widths # 2 clusters
+silinfo_3clust$clus.avg.widths # 3 clusters
+```
+
+```{r}
+# the total average (mean of all individual silhouette widths)
+silinfo_2clust$avg.width # 2 clusters
+silinfo_3clust$avg.width # 3 clusters
+```
+
+```{r}
+# the size of each clusters
+clara_list[[1]]$clusinfo # 2 clusters
+clara_list[[2]]$clusinfo # 3 clusters
+```
+
+```{r}
+### objects with negative silhouette
+# 2 clusters
+neg_sil_index_2clust <- which(sil_2clust[, 'sil_width'] < 0)
+sil_2clust[neg_sil_index_2clust, , drop = FALSE]
+
+# 3 clusters
+neg_sil_index_3clust <- which(sil_3clust[, 'sil_width'] < 0)
+sil_3clust[neg_sil_index_3clust, , drop = FALSE]
+```
+
+**Dunn Index:** reflects the compactness and separation of clusters, calculated as the ratio of the minimum inter-cluster distance to the maximum intra-cluster distance. Its range is from 0 to infinity. A higher Dunn index value indicates better clustering, where clusters are well separated and compact. Conversely, a lower Dunn index value indicates poor clustering, where clusters are not well separated or are too spread out.
+
+From the results below, we can see that CLARA algorithm with 2 clusters and 3 clusters produce approximately the same values of Dunn Index that are very close to 0, indicating a poor clustering results for both cases.
+
+```{r}
+for (i in seq_along(k_list)) {
+
+  # statistics for CLARA clustering
+  clara_stats <- cluster.stats(d = dist(df2),
+                              clara_list[[i]]$cluster)
+
+  # Dunn's index
+  cat(k_list[[i]], "clusters - Dunn Index:", clara_stats$dunn, "\n")
+}
+```
+
+### External Validation
+
+In external validation, the result of CLARA clustering is compared with the true labels of the dataset (i.e. Response - 0/1) to assess if the clustering matches the data structure. The corrected Rand Index and Meila's variation index VI are used to quantify the agreement between the CLARA clustering and the true labels. The value of both indices ranges from -1 (no agreement) to 1 (perfect agreement).
+
+From the cross-tabulation between the Response labels and the CLARA clusters, a few points can be noted about the distribution profile:
+
+- When considering 2 clusters, 40.6% of the response 0 (refused the offer) is classified into cluster 1 and 59.4% into cluster 2, while 61.6% the response 1 (accepted the offer) is classified into cluster 1 and 38.4% into cluster 2. There is approximately a 40/60 split between 2 clusters in both classes of response, but the ratio is reversed from the other class.
+
+- When considering 3 clusters, most of the response 0 (refused the offer) is classified into cluster 3 (49.5%), while cluster 1 and 2 have about the same proportion (21.2% and 29.3%). Conversely, most of the response 1 (accepted the offer) is classified into cluster 1, while cluster 2 and 3 share about the same proportion (26.7% and 29.1%).
+
+The Rand indices indicate that the agreement between the reponse labels and CLARA clustering is 0.03 for 2 clusters and 0.04 for 3 clusters. Both Rand indices are very close to 0, so the clustering is no better than random. Similarly, the Meila's VI indicate an agreement of 1.09 for 2 clusters and 1.45 for 3 clusters. Note that Meila's VI values are higher than 1, so the choice of clustering algorithm may not have been appropriate for this dataset.
+
+```{r}
+### cross-tabulation between Response labels and CLARA with 2 clusters
+tab_2clust <- table(super$Response, clara_list[[1]]$cluster)
+dimnames(tab_2clust) <- list(Response = c(0, 1), Cluster = c(1, 2))
+
+# count
+tab_2clust
+
+# percentage
+prop.table(tab_2clust, margin = 1)*100
+```
+
+```{r}
+### cross-tabulation between Response labels and CLARA with 3 clusters
+tab_3clust <- table(super$Response, clara_list[[2]]$cluster)
+dimnames(tab_3clust) <- list(Response = c(0, 1), Cluster = c(1, 2, 3))
+
+# count
+tab_3clust
+
+# percentage
+prop.table(tab_3clust, margin = 1)*100
+```
+
+```{r}
+# compute cluster stats
+# CLARA with 2 clusters
+stats_2clust <- cluster.stats(d = dist(df2),
+                              super$Response,
+                              clara_list[[1]]$cluster)
+
+# CLARA with 3 clusters
+stats_3clust <- cluster.stats(d = dist(df2),
+                              super$Response,
+                              clara_list[[2]]$cluster)
+```
+
+```{r}
+# corrected Rand Index
+cat("\n2 clusters - corrected Rand Index:", stats_2clust$corrected.rand)
+cat("\n3 clusters - corrected Rand Index:", stats_3clust$corrected.rand)
+```
+
+```{r}
+# Meila's variation index VI
+cat("\n2 clusters - Meila's variation index VI:", stats_2clust$vi)
+cat("\n3 clusters - Meila's variation index VI:", stats_3clust$vi)
+```
+
+Based on the results of both internal and external validation, it can be inferred that the clustering goodness level is equivalent for both 2-cluster and 3-cluster CLARA procedures. However, CLARA is also not a suitable choice for a clustering algorithm with this dataset.
+
+# DBSCAN
+
+```{r}
+# Determine the value of epsilon
+dbscan::kNNdistplot(df2, k =  4)
+abline(h = 3.5, lty = 2)
+```
+
+```{r}
+# DBSCAN
+set.seed(123)
+db <- fpc::dbscan(df2, eps = 3.5, MinPts = 4)
+```
+
+```{r}
+# plot DBSCAN results
+fviz_cluster(db, data = df2, stand = FALSE,
+             ellipse = FALSE, show.clust.cent = FALSE,
+             geom = "point",palette = "jco", ggtheme = theme_classic())
+```
+
+```{r}
+# internal validation - Si coefficient
+# plot the silhouette for each observation
+sil_db <- silhouette(db$cluster, dist(df2))
+fviz_silhouette(sil_db)
+```
+
+# Hierarchical K-means Clustering
+
+```{r}
+# hierarchical k-means clustering
+res.hk <-hkmeans(df2, 2) # 2 clusters
+res.hk1 <-hkmeans(df2, 3) # 3 clusters
+```
+
+```{r}
+# visualize the tree
+fviz_dend(res.hk, cex = 0.6, palette = "jco",
+          rect = TRUE, rect_border = "jco", rect_fill = TRUE)
+```
+
+```{r}
+# visualize the final clusters
+
+# 2 clusters
+fviz_cluster(res.hk,
+            ellipse.type = "t",
+            geom = "point", pointsize = 1,
+            palette = "jco", repel = TRUE,
+            ggtheme = theme_classic())
+
+# 3 clusters
+fviz_cluster(res.hk1,
+            ellipse.type = "t",
+            geom = "point", pointsize = 1,
+            palette = "jco", repel = TRUE,
+            ggtheme = theme_classic())
+```
+
+```{r}
+# internal validation - Si coefficient
+# plot the silhouette for each observation
+
+# 2 clusters
+sil_hk <- silhouette(res.hk$cluster, dist(df2))
+fviz_silhouette(sil_hk)
+
+# 3 clusters
+sil_hk1 <- silhouette(res.hk1$cluster, dist(df2))
+fviz_silhouette(sil_hk1)
+```
+
+# Fuzzy Clustering
+
+```{r}
+# fuzzy clustering
+res.fanny <- fanny(df2, 2, memb.exp = 1.2) # 2 clusters
+res.fanny1 <- fanny(df2, 3, memb.exp = 1.2) # 3 clusters
+```
+
+```{r}
+# visualize the final clusters
+
+# 2 clusters
+fviz_cluster(res.fanny, ellipse.type = "t", repel = TRUE,
+             palette = "jco", ggtheme = theme_minimal(),
+             legend = "right",
+             labelsize = 0)
+
+# 3 clusters
+fviz_cluster(res.fanny1, ellipse.type = "t", repel = TRUE,
+             palette = "jco", ggtheme = theme_minimal(),
+             legend = "right",
+             labelsize = 0)
+```
+
+```{r}
+# internal validation - Si coefficient
+# plot the silhouette for each observation
+
+# 2 clusters
+sil_fanny <- silhouette(res.fanny$cluster, dist(df2))
+fviz_silhouette(sil_fanny)
+
+# 3 clusters
+sil_fanny1 <- silhouette(res.fanny1$cluster, dist(df2))
+fviz_silhouette(sil_fanny1)
+```
+
+# Further Statistic Analysis
+
+## Stepwise Regression Model
+
+```{r}
+cluster <- clara_list[[1]]$cluster #2 clusters from CLARA above
+```
+
+```{r}
+df_reg <- cbind(super, as.factor(cluster)) #same as df but include response variable
+head(df_reg)
+```
+
+```{r}
+colnames(df_reg)[colnames(df_reg) == "as.factor(cluster)"] <- "cluster"
+str(df_reg)
+```
+
+```{r}
+# make this example reproducible
+set.seed(1)
+
+#use 70% of dataset as training set and 30% as test set
+sample <- sample(c(TRUE, FALSE), nrow(df_reg), replace=TRUE, prob=c(0.7,0.3))
+train.data  <- df_reg[sample, ]
+test.data   <- df_reg[!sample, ]
+
+str(train.data)
+```
+### Stepwise Logistic Regression with Clustering Label
+
+```{r}
+# model
+model <- glm(Response ~., data = train.data, family = binomial(logit)) %>%
+  stepAIC(trace = TRUE)
+
+summary(model)
+```
+
+```{r}
+# Make predictions
+probabilities <- model %>% predict(test.data, type = "response")
+predicted.classes <- ifelse(probabilities > 0.5, 1, 0)
+```
+
+```{r}
+# Model accuracy
+mean(predicted.classes==test.data$Response)
+```
+
+```{r}
+confusion_matrix <- table(test.data$Response, predicted.classes)
+confusion_matrix
+
+confusionMatrix(confusion_matrix, positive = "1")
+```
+
+### Stepwise Logistic Regression without Clustering Label
+
+We want to compare the accuracy of the regression model with or without the clustering label. Therefore we fit the same dataset to stepwise logistic regression model, just exclude clustering label this time.
+
+```{r}
+# model
+model2 <- glm(Response ~., data = train.data[-22], family = binomial(logit)) %>%
+  stepAIC(trace = TRUE)
+
+summary(model2)
+```
+
+```{r}
+# Make predictions
+probabilities2 <- model2 %>% predict(test.data[-22], type = "response")
+predicted.classes2 <- ifelse(probabilities2 > 0.5, 1, 0)
+```
+
+```{r}
+# Model accuracy
+mean(predicted.classes2==test.data$Response)
+```
+
+```{r}
+confusion_matrix2 <- table(test.data$Response, predicted.classes2)
+confusion_matrix2
+
+confusionMatrix(confusion_matrix2, positive = "1")
+```
+
+## Distribution of Clusters in Categorical Variables
+
+```{r}
+### cross-tabulation between Response and CLARA clusters
+tab_response <- table(super$Response, cluster)
+
+# count
+tab_response
+
+# percentage
+prop.table(tab_response, margin = 1)*100
+```
+```{r}
+# perform chi-square test
+chisq.test(tab_response)
+```
+
+```{r, fig.width=14, fig.height=8}
+# create the side-by-side bar graph
+barplot(tab_response, beside = TRUE, xlab = "Cluster", ylab = "Frequency",
+        col = c("#D3D3D3", "#3F7ED5"), legend.text = rownames(tab_response),
+        args.legend = list(title = "Response", x = "top"))
+```
+
+### Marital_Status
+
+There’re several variables for marital status, such as married, divorced, together, single, we make it into two groups: married / together for one group and other status for another group.
+
+```{r}
+### cross-tabulation between Marital_Status and CLARA clusters
+tab_ms <- table(super$Marital_Status, cluster)
+
+# count
+tab_ms
+
+# percentage
+prop.table(tab_ms, margin = 1)*100
+```
+
+```{r}
+### group the data
+tab_ms <- table(super$Marital_Status, cluster)
+new_row_married <- colSums(tab_ms[c(4,6),])
+new_row_others <- colSums(tab_ms[c(1:3,5,7,8),])
+new_table_ms <- rbind(new_row_married, new_row_others)
+rownames(new_table_ms)[1] <- "Married / Together"
+rownames(new_table_ms)[2] <- "Others"
+
+# count
+new_table_ms
+
+# percentage
+prop.table(new_table_ms, margin = 1)*100
+```
+
+From the chi-square test and side-by-side boxplot, it's found that the marital status (married / together and others) are independent with the clustering group. In chi-square test, p-value is 0.54, null hypothesis is failed to reject.
+
+```{r}
+# perform chi-square test
+chisq.test(new_table_ms)
+```
+
+```{r, fig.width=14, fig.height=8}
+# create the side-by-side bar graph
+barplot(new_table_ms, beside = TRUE, xlab = "Cluster", ylab = "Frequency",
+        col = c("#D3D3D3", "#3F7ED5"), legend.text = rownames(new_table_ms),
+        args.legend = list(title = "Marital Status", x = "topleft"))
+```
+
+### Kidhome
+
+For number of kids at home, we also make it into two groups, no kids and with kids. The percentage of response and marital status seems not have huge different between 2 clusters. What we are interested is “with / without kids” at home.
+
+```{r}
+### cross-tabulation between Kidhome and CLARA clusters
+tab_kid <- table(super$Kidhome, cluster)
+
+# count
+tab_kid
+
+# percentage
+prop.table(tab_kid, margin = 1)*100
+```
+
+```{r}
+### group the data
+tab_kid <- table(super$Kidhome, cluster)
+new_row <- colSums(tab_kid[2:3,])
+new_table_kid <- rbind(tab_kid[1,], new_row)
+rownames(new_table_kid)[1] <- "No Kids at home"
+rownames(new_table_kid)[2] <- "With Kids at home"
+
+# count
+new_table_kid
+
+# percentage
+prop.table(new_table_kid, margin = 1)*100
+```
+
+In contrast to marital status, side-by-side boxplot suggests that with or without kids may associate with the cluster group. Chi-square test further proved that as p-value is smaller than 0.05.
+
+```{r}
+# perform chi-square test
+chisq.test(new_table_kid)
+```
+
+```{r, fig.width=14, fig.height=8}
+# create the side-by-side bar graph
+barplot(new_table_kid, beside = TRUE, xlab = "Cluster", ylab = "Frequency",
+        col = c("#D3D3D3", "#3F7ED5"), legend.text = rownames(new_table_kid),
+        args.legend = list(title = "Kids Status", x = "top"))
+```
+
+### Teenhome
+
+```{r}
+### cross-tabulation between Teenhome and CLARA clusters
+tab_teen <- table(super$Teenhome, cluster)
+
+# count
+tab_teen
+
+# percentage
+prop.table(tab_teen, margin = 1)*100
+```
+
+```{r}
+### group the data
+tab_teen <- table(super$Teenhome, cluster)
+new_row <- colSums(tab_teen[2:3,])
+new_table_teen <- rbind(tab_teen[1,], new_row)
+rownames(new_table_teen)[1] <- "No Teens at home"
+rownames(new_table_teen)[2] <- "With Teens at home"
+
+# count
+new_table_teen
+
+# percentage
+prop.table(new_table_teen, margin = 1)*100
+```
+
+```{r}
+# perform chi-square test
+chisq.test(new_table_teen)
+```
+
+```{r, fig.width=14, fig.height=8}
+# create the side-by-side bar graph
+barplot(new_table_teen, beside = TRUE, xlab = "Cluster", ylab = "Frequency",
+        col = c("#D3D3D3", "#3F7ED5"), legend.text = rownames(new_table_teen),
+        args.legend = list(title = "Teens Status", x = "top"))
+```
+
+### Education
+
+```{r}
+### cross-tabulation between Teenhome and CLARA clusters
+tab_education <- table(super$Education, cluster)
+
+# count
+tab_education
+
+# percentage
+prop.table(tab_education, margin = 1)*100
+```
+
+```{r}
+### group the data
+tab_edu <- table(super$Education, cluster)
+new_row <- colSums(tab_edu[c(2,3),])
+new_row1 <- colSums(tab_edu[c(1, 4:5),])
+new_table_edu <- rbind(new_row, new_row1)
+rownames(new_table_edu)[1] <- "Basic Education / Graduation"
+rownames(new_table_edu)[2] <- "Higher Education"
+
+# count
+new_table_edu
+
+# percentage
+prop.table(new_table_edu, margin = 1)*100
+```
+
+```{r}
+# perform chi-square test
+chisq.test(new_table_edu)
+```
+
+```{r, fig.width=14, fig.height=8}
+# create the side-by-side bar graph
+barplot(new_table_edu, beside = TRUE, xlab = "Cluster", ylab = "Frequency",
+        col = c("#D3D3D3", "#3F7ED5"), legend.text = rownames(new_table_edu),
+        args.legend = list(title = "Education", x = "topleft"))
+```
+
+# Conclusion
+
+- Clustering tendency of the dataset is verified by the Hopkins statistic method and visualization techniques, and compared it with a random dataset.
+
+- Hierarchical clustering may not be appropriate for this dataset, even though it's the best algorithm recommended.
+
+- 2 clusters is better for the dataset. CLARA, hierarchical k-means and fuzzy k-means clustering are the preferred methods.
+
+- Clustering algorithms can identify patterns or structures. By grouping similar data points together into clusters, it is easier to identify meaningful patterns and relationships among the data.
+
+- To predict the response variable, logistic regression is preferred. When we consider logistic regression or clustering algorithm to analyze the data, it depends on the purpose of the study.
+
+- Clustering group is associated with number of kids.
+
+# References
+
+Ilu, Saratu Yusuf, and Rajesh Prasad. “Improved Autoregressive Integrated Moving Average Model for COVID-19 Prediction by Using Statistical Significance and Clustering Techniques.” Heliyon 9, no. 2 (February 1, 2023). doi:10.1016/j.heliyon.2023.e13483.
+
